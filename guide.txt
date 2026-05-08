@@ -1,0 +1,161 @@
+NVIDIA Ampere (SM86) (RTX 3070)
+///////////////////////////////////////////////////////////////////////////
+# 1. Generate the human-readable PTX (for your report/analysis)
+nvcc -arch=sm_86 --ptx aten.cu -o aten.ptx
+
+# 2. Generate the simulator-ready binary (with embedded SM86 code)
+nvcc -arch=sm_86 aten.cu -o aten -lcudart
+
+activate_sim
+./aten
+////////////////////////////////////////////////////////////////
+
+***********************************
+Patched: version mismatch
+accelwatch in config file
+**************************************
+
+Building llama.cpp for RTX 3070 Config
+
+//////////////////////////////////////////////////////////////////////
+
+1. GEMM (General Matrix Multiplication), naive, tiled(8, 16, 32)
+2. Softmax / LayerNorm
+3. FlashAttention (or similar)  
+//////////////////////////////////////////////////////////////////////
+
+llama.cpp (reference workload)
+        ↓
+Extract operation characteristics
+        ↓
+Run equivalent kernels (GEMM, etc.)
+        ↓
+Analyze on GPGPU-Sim
+/////////////////////////////////////////////////////////////////////
+
+We model transformer computations from llama.cpp using GEMM kernels with matching dimensions derived from the model architecture.”
+* “How does GPU architecture affect LLM inference?”
+* “What is the bottleneck in transformer layers?”
+* “How do cache sizes impact attention performance?”
+/////////////////////////////////////////////////////////////////////////
+
+To optimize for the "real sense" (improving the performance of an LLM on an RTX 3070-like architecture), you ignore the "simulation rate" and focus on the **microarchitectural parameters** in your `gpgpusim.config`. Changing these values allows you to see how the LLM kernel would perform if you theoretically modified the GPU hardware itself.
+
+1. Memory Hierarchy Optimizations
+LLM kernels are almost always "Memory Bound". You can optimize how the hardware handles the massive weight-loading of the Transformer layers.
+
+=> L2 Cache Size(`-gpgpu_cache:dl2`): Increasing the number of sets or associativity here can reduce the traffic to the DRAM. If your model weights fit better in L2, the "stuck" simulation will actually finish faster in "simulated time".
+
+=> L1 Cache / Shared Memory Split (`-gpgpu_shmem_size`): Modern GPUs (like the RTX 3070) can shift memory between L1 and Shared Memory. Since you are writing a Tiled GEMM, increasing the Shared Memory size allows for larger tiles, which reduces the total number of DRAM accesses.
+
+=> Memory Controller Count (`-gpgpu_n_mem`): You can simulate what happens if the GPU had more memory controllers (increasing total bandwidth).
+
+2. Compute & Execution Optimizations
+These settings affect how the "math" part of the LLM (the Matrix Multiplication) is scheduled.
+=> Register File Size (`-gpgpu_shader_registers`): In your logs, you saw `limited by: threads`. If you increase the register count per SM, you can achieve higher Warp Occupancy. This means more threads are "active" at once, hiding the latency of memory fetches.
+
+=> Scheduler Policy (`-gpgpu_scheduler`): You currently have `lrr` (Loose Round Robin). Switching this to `gto` (Greedy-Then-Oldest) often helps LLM workloads by prioritizing warps that are further ahead in their computation, potentially reducing resource contention.
+
+=> SM Count (`-gpgpu_n_clusters`)**: You are at 46 (RTX 3070). You can increase this to see if the LLM kernel scales linearly or if it hits a "bottleneck" where adding more cores doesn't help because the memory is too slow.
+
+3. Latency Tuning
+=> DRAM Latency: In your logs, this is set to `254` cycles. If you decrease this, you are simulating a move from GDDR6 to faster memory like HBM (High Bandwidth Memory).
+=> Pipeline Latencies (`-ptx_opcode_latency_fp`): You can lower the cycles required for floating-point operations. This shows if the LLM would benefit from faster "math units" or if the bottleneck is purely the memory.
+///////////////////////////////////////////////////////////////////
+
+Matrices to look for;
+
+1. Performance & Throughput Metrics
+	Total Cycles (gpu_tot_sim_cycle)  
+	IPC (gpu_tot_ipc): Instructions Per Cycle
+	Warp Occupancy (gpu_tot_occupancy)
+	
+2. Memory Hierarchy Efficiency
+	L1 Data Cache Miss Rate (L1D_total_cache_miss_rate)
+	L2 Cache Miss Rate (L2_total_cache_miss_rate)
+	DRAM Bandwidth (L2_BW_total)
+	
+3. Memory & Resource Stalls
+	DRAM Read/Write Requests: (gpgpu_n_mem_read_global)
+	Shared Memory Bank Conflicts (gpgpu_n_shmem_bkconflict)
+	
+///////////////////////////////////////////////////////////////////////
+Metric List
+
+1) Execution Time (gpu_tot_sim_cycle)
+2) Throughput (IPC) (gpu_tot_ipc)
+3) Parallelism	(gpu_tot_occupancy): The percentage of active warps. If this is low, your hardware is idling while waiting for data.
+4) Cache Efficiency (L1D_total_cache_miss_rate): Directly measures the success of your Tiling strategy.
+5) Memory Bottleneck (gpgpu_n_mem_read_global): Total DRAM requests. If this stays high despite larger caches, your kernel is memory-bound.
+6) Resource Conflict (gpgpu_n_shmem_bkconflict): Only relevant for Tiled runs. Shows if threads are fighting for the same Shared Memory bank.
+7) DRAM Bandwidth (L2_BW_total)
+
+///////////////////////////////////////////////////////////////////////
+Parameter List and Measured for Metric, keep one parameter at default value while measuring for others.
+
+1) Compute Density (-gpgpu_n_clusters): Represents the number of SMs.  
+	gpu_tot_sim_cycle
+	=> Measures "Scaling Efficiency"—does doubling the SMs actually halve the execution time?.
+	=> Def: 46
+	=> Range: 12, 20, 30, 46, 60
+	
+2) Memory Bandwidth (-gpgpu_n_mem): Represents Memory Controllers. LLMs are often "Memory Bandwidth Bound." Increasing this mimics faster VRAM.
+	gpu_tot_sim_cycle 
+	L2_BW_total
+	gpgpu_n_mem_read_global
+	=> Identifies at what point the LLM stops being "Memory Bound" and becomes "Compute Bound".
+	=> Def: 16
+	=> Range: 8, 16, 24, 32, 64
+	
+3) On-Chip Storage (-gpgpu_unified_l1d_size): In Ampere, L1 and Shared Mem share a pool. Larger pools allow larger Tiles without spills.
+	L1D_total_cache_miss_rate
+	gpgpu_n_mem_read_global
+	=> Evaluates the effectiveness of your Tiling strategy in reducing off-chip traffic.
+	=> Def: 128 (KB)
+	=> Range: 16, 32, 64, 96, 128, 160, 196
+	
+4) Warp Scheduling (-gpgpu_scheduler) (lrr, gto): LLMs have long dependency chains; GTO helps hide latency better than LRR.
+	gpu_tot_ipc 
+	gpu_tot_occupancy
+	gpgpu_n_mem_read_global
+	=> Shows which scheduling logic (LRR vs. GTO) best hides memory latency for serial matrix math.  
+	=> Def: lrr
+	=> Range: lrr (Loose Round Robin), gto (Greedy-Then-Oldest), two_level_active
+
+6) L2cache size (gpgpu_cache:dl2 S:64:128:16)
+	gpgpu_n_mem_read_global
+	
+** FlashAttention is a more complex "Fusion" kernel. It combines GEMM-like math with Softmax-like vector ops in a single step to stay fast; 
+For FlashAttention add
+	P: Shared Memory Banks (-gpgpu_shmem_num_banks)
+	M: gpgpu_n_shmem_bkconflict, gpu_tot_ipc
+	=> Def: 16
+	=> Range: 4, 8, 16, 32, 64
+
+** Resource Conflict (gpgpu_n_shmem_bkconflict) => for each tile size of tiled kernel
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+Key Params and Matrices for Kernels
+1) Softmax; p: Memory Bandwidth (-gpgpu_n_mem); m: L1D_total_cache_miss_rate
+2) FlashAttention; p: Shared Memory Size (-gpgpu_shmem_size), SM Count (-gpgpu_n_clusters); m: gpgpu_n_shmem_bkconflict, gpu_tot_ipc
+3) Matmul: p: -gpgpu_n_clusters, m: ipc, cache misses
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+SOFTMAX
+
+2) Memory Bandwidth (-gpgpu_n_mem)
+	L2_BW_total
+	gpu_tot_sim_cycle
+	(8, 16, 24, 32, 64)
+
+3) Shared Memory Banks (-gpgpu_shmem_num_banks)
+	gpgpu_n_shmem_bkconflict
+	(4, 8, 16, 32, 64)
+
+4) Warp Scheduler (lrr vs gto)
+	gpu_tot_ipc
+	(lrr, gto, tpa)
+
+5) L2 Cache Size
+	gpgpu_n_mem_read_global
+	(1, 2, 4, 8, 16)
+//////////////////////////////////////////////////////////////////////////////////////////////////

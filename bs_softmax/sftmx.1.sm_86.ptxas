@@ -1,0 +1,11 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z17softmax_optimizedPfS_i' for 'sm_86'
+ptxas info    : Function properties for _Z17softmax_optimizedPfS_i
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 1 barriers, 372 bytes cmem[0]
+ptxas info    : Compile time = 7.486 ms
+ptxas info    : Compiling entry function '_Z16gemm_llama_tiledPfS_S_iii' for 'sm_86'
+ptxas info    : Function properties for _Z16gemm_llama_tiledPfS_S_iii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 1 barriers, 2048 bytes smem, 388 bytes cmem[0]
+ptxas info    : Compile time = 3.389 ms
